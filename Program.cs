@@ -42,7 +42,7 @@ namespace HD2_Helper
         }
     }
 
-    public class MainForm : Form
+    public partial class MainForm : Form
     {
         private static readonly string AppDataPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "HD2 Helper");
         private static readonly string SettingsPath = Path.Combine(AppDataPath, "settings.ini");
@@ -231,9 +231,7 @@ namespace HD2_Helper
             LoadUserSetting();
             LoadSetting();
 
-            // 업데이트 체크
-            bool isUpdating = await CheckForUpdates();
-            if (isUpdating) return;
+            // Customized build: upstream update prompts do not apply to this version.
 
             // 입력 처리
             this.Shown += (s, e) =>
@@ -255,10 +253,12 @@ namespace HD2_Helper
 
             // 웹뷰
             InitializeWebView();
+            StartLoadoutMonitor();
         }
        
         private void LoadDatabase(string path = "database.json")
         {
+            if (!Path.IsPathRooted(path)) path = Path.Combine(AppContext.BaseDirectory, path);
             if (!File.Exists(path))
             {
                 MessageBox.Show($"{path} 파일을 찾을 수 없습니다.\n프로그램을 종료합니다.", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -574,6 +574,22 @@ namespace HD2_Helper
                     this.Show();
                     this.Activate();
                 }
+                else if (type == "SET_AUTO_LOADOUT")
+                {
+                    _autoLoadoutEnabled = doc.RootElement.GetProperty("enabled").GetBoolean();
+                    ResetFileLoadout();
+                    SaveSetting();
+                    SendSettingsToWeb();
+                }
+                else if (type == "SAVE_USER_CODE" || type == "DELETE_USER_CODE")
+                {
+                    if (doc.RootElement.TryGetProperty("code", out var code) && code.ValueKind == JsonValueKind.String)
+                        UpdateUserCode(code.GetString()!, doc.RootElement.TryGetProperty("name", out var name) && name.ValueKind == JsonValueKind.String ? name.GetString() : null, type == "DELETE_USER_CODE");
+                }
+                else if (type == "CHOOSE_SAVE_FILE")
+                {
+                    ChooseSaveFile();
+                }
                 else if (type == "SET_INPUT_DELAY")
                 {
                     if (doc.RootElement.TryGetProperty("value", out var valueElement) && valueElement.TryGetInt32(out int value))
@@ -753,6 +769,7 @@ namespace HD2_Helper
 
                 string key = line[..separator].Trim();
                 string value = line[(separator + 1)..].Trim();
+                if (key.Equals("saveFilePath", StringComparison.OrdinalIgnoreCase)) { _saveFilePath = value; continue; }
                 if (!uint.TryParse(value, out uint vk) && !key.Equals("inputDelay", StringComparison.OrdinalIgnoreCase))
                     continue;
 
@@ -760,6 +777,7 @@ namespace HD2_Helper
                 {
                     if (int.TryParse(value, out int delay)) _inputDelay = Math.Clamp(delay, 30, 100);
                 }
+                else if (key.Equals("autoLoadoutEnabled", StringComparison.OrdinalIgnoreCase)) _autoLoadoutEnabled = vk != 0;
                 else if (key.Equals("stratagemCompactLayout", StringComparison.OrdinalIgnoreCase))
                 {
                     _stratagemCompactLayout = vk != 0;
@@ -793,6 +811,8 @@ namespace HD2_Helper
 
             var lines = new List<string>
             {
+                $"autoLoadoutEnabled={(_autoLoadoutEnabled ? 1 : 0)}",
+                $"saveFilePath={_saveFilePath}",
                 $"inputDelay={Math.Clamp(_inputDelay, 30, 100)}",
                 $"stratagemCompactLayout={(_stratagemCompactLayout ? 1 : 0)}",
                 $"autoSelectKey={_autoSelectKey}",
@@ -895,6 +915,16 @@ namespace HD2_Helper
             var payload = new
             {
                 type = "SETTINGS_LOADED",
+                autoLoadoutEnabled = _autoLoadoutEnabled,
+                saveFilePath = _saveFilePath,
+                registeredCodeCount = _saveCodes?.Count ?? 67,
+                autoLoadoutStatus = _loadoutStatus,
+                autoLoadoutInterval = SavePollInterval,
+                detectedLoadout = _detectedDescriptions,
+                detectedCodes = _savedState.Codes?.Select(c => new { code = c.ToString("X8"), unknown = _saveCodes == null || !_saveCodes.ContainsKey(c), editable = _userCodes.ContainsKey(c) && !_baseCodes.ContainsKey(c) }).ToArray(),
+                userCodes = _userCodes.OrderBy(p => p.Value).Select(p => new { code = p.Key.ToString("X8"), name = p.Value }).ToArray(),
+                codeNames = _sequenceMap.Where(p => p.Value.Length > 0).Select(p => p.Key).OrderBy(n => n).ToArray(),
+                userCodesPath = UserCodesPath,
                 inputDelay = Math.Clamp(_inputDelay, 30, 100),
                 stratagemCompactLayout = _stratagemCompactLayout,
                 waitingTarget = _isWaitingForKey ? _waitingKeyTarget : null,
@@ -1522,9 +1552,6 @@ namespace HD2_Helper
             if (!IsGameActive() || _isChat)
                 return;
 
-            if (Interlocked.Exchange(ref _isSending, 1) == 1)
-                return;
-
             string[]? seq = null;
 
             if (slotIndex == -1)
@@ -1533,7 +1560,7 @@ namespace HD2_Helper
             }
             else
             {
-                var slots = _currentSlots;
+                var slots = EffectiveSlots;
 
                 if (slotIndex < 0 || slotIndex >= slots.Length)
                     return;
@@ -1547,6 +1574,7 @@ namespace HD2_Helper
                     return;
             }
 
+            if (Interlocked.Exchange(ref _isSending, 1) == 1) return;
             Task.Run(() =>
             {
                 try
@@ -1803,7 +1831,7 @@ namespace HD2_Helper
             if (!IsGameActive() || _isChat || CursorUtil.IsVisible())
                 return;
 
-            var slotNames = _currentSlots.Where(s => !string.IsNullOrEmpty(s)).ToArray();
+            var slotNames = EffectiveSlots.Where(s => !string.IsNullOrEmpty(s)).ToArray();
             if (slotNames.Length == 0)
                 return;
 
@@ -1831,7 +1859,7 @@ namespace HD2_Helper
                     {
                         await Task.Delay(50);
 
-                        int Index = Array.IndexOf(_currentSlots ?? Array.Empty<string>(), selected);
+                        int Index = Array.IndexOf(EffectiveSlots, selected);
                         if (Index != -1)
                             TriggerStratagem(Index);
                     });
@@ -2953,7 +2981,7 @@ namespace HD2_Helper
 
             private bool ProcessHangulBypass(uint vkCode, bool isDown)
             {
-                if (vkCode >= 0x10 && vkCode <= 0x12 || vkCode == 0x09)
+                if (HangulInputPolicy.PreservesComposition(vkCode))
                     return false;
 
                 if (!isHangulMode)
@@ -3156,6 +3184,8 @@ namespace HD2_Helper
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
+            _loadoutTimer?.Stop();
+            _loadoutTimer?.Dispose();
             _inputHook?.Dispose();
             _padLoopCts?.Cancel();
             _padLoopCts?.Dispose();
@@ -3180,3 +3210,4 @@ namespace HD2_Helper
         }
     }
 }
+

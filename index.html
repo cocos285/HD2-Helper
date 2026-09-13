@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="ko">
 <head>
     <meta charset="utf-8">
@@ -1198,6 +1198,14 @@
             <div class="box-settings">
                 <h4>프로그램 설정</h4>
                 <div class="settings-list">
+                    <div style="padding:6px;font-size:11px;border:1px solid #666">
+                        <label><input id="auto-loadout-enabled" type="checkbox" onchange="saveAutoLoadout()"> 저장 파일 자동 연결</label>
+                        <button type="button" onclick="postAppMessage({type:'CHOOSE_SAVE_FILE'})">저장 파일 선택</button>
+                        <div id="save-file-path" style="overflow-wrap:anywhere;font-size:10px;color:#aaa"></div>
+                        <div id="auto-loadout-status" style="color:#ffe65a;white-space:normal"></div>
+                        <div id="auto-loadout-names" style="white-space:pre-line"></div>
+                        <button type="button" onclick="openUserCodes()">사용자 등록 관리</button>
+                    </div>
                     <div class="setting-row" onclick="cycleInputDelaySetting()" oncontextmenu="adjustInputDelaySetting(event, -5)">
                         <span class="setting-label">입력 딜레이</span>
                         <button class="setting-value-btn" id="setting-input-delay" type="button" tabindex="-1"></button>
@@ -1250,6 +1258,31 @@
         </div>
     </div>
 
+    <style>
+        #user-code-dialog {background:#252525;color:#eee;border:1px solid #ffe65a;border-radius:8px;width:520px;max-width:85vw;max-height:85vh;padding:22px;overflow:auto;}
+        #user-code-dialog::backdrop {background:#000a;}
+        #user-code-dialog button {padding:6px 10px;cursor:pointer;}
+        #user-code-dialog input, #user-code-dialog select {box-sizing:border-box;width:100%;background:#333;color:#fff;border:1px solid #777;padding:8px;margin:6px 0;}
+        #user-code-dialog p {line-height:1.5;}
+        .user-code-row {display:flex;gap:6px;align-items:center;border-bottom:1px solid #555;padding:8px 0;}
+        .user-code-row span {flex:1;}
+    </style>
+    <dialog id="user-code-dialog" aria-labelledby="user-code-title">
+        <h3 id="user-code-title">스트라타잼 등록</h3>
+        <div id="user-code-editor">
+            <p id="user-code-target"></p>
+            <p>이 코드에 해당하는 실제 스트라타잼을 선택하세요. 게임에서 선택을 바꿔도 등록 대상 코드는 바뀌지 않습니다.</p>
+            <label for="user-code-search">이름 검색</label>
+            <input id="user-code-search" type="search" placeholder="예: 오토캐넌" oninput="filterCodeNames()">
+            <label for="user-code-name">스트라타잼</label>
+            <select id="user-code-name" size="7"></select>
+            <p style="font-size:12px;color:#bbb">호출 방향키가 등록된 장비만 표시됩니다.</p>
+            <button id="user-code-save" type="button" onclick="submitUserCode(false)">등록 저장</button>
+        </div>
+        <div id="user-code-manager" hidden><div id="user-code-list"></div><p id="user-code-location" style="font-size:12px;overflow-wrap:anywhere"></p></div>
+        <p id="user-code-error" role="alert" style="color:#ffb0a0"></p>
+        <button type="button" onclick="document.getElementById('user-code-dialog').close()">닫기</button>
+    </dialog>
     <script>
         function updateUiScale() {
             const root = document.documentElement;
@@ -1520,7 +1553,85 @@
             postAppMessage({ type: 'START_KEY_CAPTURE', target });
         }
 
+        function saveAutoLoadout() {
+            postAppMessage({type:'SET_AUTO_LOADOUT', enabled:document.getElementById('auto-loadout-enabled').checked});
+        }
+        let codeSettings = {}, editingUserCode = null, codeRequestPending = false;
+        function codeResult(data) {
+            codeRequestPending = false;
+            document.getElementById('user-code-save').disabled = false;
+            if (data.ok) {
+                if (document.getElementById('user-code-manager').hidden) document.getElementById('user-code-dialog').close();
+                else renderUserCodeList();
+            } else document.getElementById('user-code-error').textContent = data.message || '저장하지 못했습니다.';
+        }
+        function filterCodeNames(selected) {
+            const select = document.getElementById('user-code-name');
+            const previous = typeof selected === 'string' ? selected : select.value;
+            const search = document.getElementById('user-code-search').value.replace(/\s/g,'').toLowerCase();
+            select.replaceChildren();
+            for (const name of codeSettings.codeNames || []) {
+                if (!name.replace(/\s/g,'').toLowerCase().includes(search)) continue;
+                const option = document.createElement('option'); option.value = name; option.textContent = name; select.append(option);
+            }
+            select.value = previous;
+        }
+        function editUserCode(code, name = '') {
+            editingUserCode = code;
+            document.getElementById('user-code-title').textContent = name ? '등록 수정' : '스트라타잼 등록';
+            document.getElementById('user-code-target').textContent = '등록 대상 코드: ' + code;
+            document.getElementById('user-code-editor').hidden = false;
+            document.getElementById('user-code-manager').hidden = true;
+            document.getElementById('user-code-error').textContent = '';
+            document.getElementById('user-code-search').value = '';
+            filterCodeNames(name);
+            const dialog = document.getElementById('user-code-dialog'); if (!dialog.open) dialog.showModal();
+        }
+        function submitUserCode(remove, code = editingUserCode) {
+            if (codeRequestPending) return;
+            const name = document.getElementById('user-code-name').value;
+            if (!remove && !name) {document.getElementById('user-code-error').textContent = '목록에서 스트라타잼을 선택해 주세요.';return;}
+            codeRequestPending = true;
+            document.getElementById('user-code-save').disabled = true;
+            document.getElementById('user-code-error').textContent = '';
+            postAppMessage({type:remove ? 'DELETE_USER_CODE' : 'SAVE_USER_CODE',code,name});
+        }
+        function renderUserCodeList() {
+            const list = document.getElementById('user-code-list'); list.replaceChildren();
+            for (const item of codeSettings.userCodes || []) {
+                const row = document.createElement('div'); row.className = 'user-code-row';
+                const text = document.createElement('span'); text.textContent = item.name + ' · ' + item.code;
+                const edit = document.createElement('button');edit.textContent = '수정';edit.onclick = () => editUserCode(item.code,item.name);
+                const del = document.createElement('button');del.textContent = '삭제';del.onclick = () => submitUserCode(true,item.code);
+                row.append(text,edit,del);list.append(row);
+            }
+            if (!list.children.length) list.textContent = '아직 사용자 등록이 없습니다. 미등록 슬롯의 등록 버튼을 이용하세요.';
+            document.getElementById('user-code-location').textContent = '보관 위치: ' + (codeSettings.userCodesPath || '');
+        }
+        function openUserCodes() {
+            document.getElementById('user-code-title').textContent = '사용자 등록 관리';
+            document.getElementById('user-code-editor').hidden = true;
+            document.getElementById('user-code-manager').hidden = false;
+            document.getElementById('user-code-error').textContent = '';
+            renderUserCodeList();document.getElementById('user-code-dialog').showModal();
+        }
         function renderSettings(data) {
+            codeSettings = data;
+            if (document.getElementById('user-code-dialog').open && !document.getElementById('user-code-manager').hidden) renderUserCodeList();
+            document.getElementById('auto-loadout-enabled').checked = data.autoLoadoutEnabled === true;
+            document.getElementById('save-file-path').textContent = data.saveFilePath || 'Steam 저장 파일 자동 검색';
+            document.getElementById('auto-loadout-status').textContent = data.autoLoadoutEnabled ? ((data.autoLoadoutStatus || '저장 파일 확인 대기') + ` · ${(data.autoLoadoutInterval ?? 1000)/1000}초 간격`) : '수동 설정 사용';
+            const slots = document.getElementById('auto-loadout-names'); slots.replaceChildren();
+            (data.detectedLoadout || []).forEach((name,i) => {
+                const row = document.createElement('div');
+                const label = document.createElement('span'); label.textContent = `${i+1}. ${name} `;row.append(label);
+                const item = (data.detectedCodes || [])[i];
+                if (item && (item.unknown || item.editable)) {
+                    const button = document.createElement('button');button.type = 'button';button.textContent = item.unknown ? '등록' : '수정';
+                    button.onclick = () => editUserCode(item.code, item.unknown ? '' : name);row.append(button);
+                }
+                slots.append(row);
+            });
             currentWaitingKeyTarget = data.waitingTarget || null;
 
             currentInputDelay = data.inputDelay ?? 30;
@@ -1594,6 +1705,7 @@
             window.chrome.webview.addEventListener('message', (event) => {
                 const data = event.data;
                 if (!data) return;
+                if (data.type === 'USER_CODE_RESULT') { codeResult(data); return; }
 
                 if (data.type === 'DISABLED_ITEMS_LOADED' && Array.isArray(data.items)) {
                     excludedItems.clear();

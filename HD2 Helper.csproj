@@ -20,12 +20,16 @@
 		<DebugSymbols>false</DebugSymbols>
 		<AllowUnsafeBlocks>True</AllowUnsafeBlocks>
 		<Version>2.0.7</Version>
+        <InformationalVersion>2.0.7-file-loadout.9</InformationalVersion>
 		<GenerateAssemblyInfo>true</GenerateAssemblyInfo>
 	</PropertyGroup>
 
 	<ItemGroup>
 		<EmbeddedResource Include="index.html" />
+
 		<Content Include="icon.ico" />
+        <Compile Remove="LoadoutRecognition.cs;LoadoutScanSchedule.cs" />
+        <Content Include="stratagem_codes.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
 	</ItemGroup>
 
 	<ItemGroup>
