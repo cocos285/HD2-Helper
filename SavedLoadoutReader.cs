@@ -46,11 +46,11 @@ internal static class SavedLoadoutReader
         if (cursor != bytes.Length) throw new InvalidDataException("예상하지 못한 추가 데이터가 있습니다.");
         for (int i = (int)size; i < payload.Length; i++)
             if (payload[i] != 0) throw new InvalidDataException("압축 뒤쪽 데이터가 맞지 않습니다.");
-        // Bytes 21..24 vary independently of the four slots; their meaning is unknown.
+        // Bytes 17..24 vary independently of the four slots; their meaning is unknown.
         // Validate the surrounding markers, not the previous sample's field value.
         if (!payload.AsSpan(0, 8).SequenceEqual(Convert.FromHexString("060100003EEACEA6")) ||
             U32(payload, 8) != size ||
-            !payload.AsSpan(16, 5).SequenceEqual(Convert.FromHexString("01A01FDC17")) ||
+            payload[16] != 1 ||
             !payload.AsSpan(25, 4).SequenceEqual(Convert.FromHexString("53ECD34F")))
             throw new InvalidDataException("장비 저장 구조가 바뀌었습니다. 연결을 중단합니다.");
         return new[] { U32(payload, 29), U32(payload, 37), U32(payload, 45), U32(payload, 53) };
